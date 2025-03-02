@@ -4,6 +4,7 @@ import pkgutil
 
 from spark_config.config import *
 
+
 def discover_plugins(plugin_prefix):
     def _try_load(name):
         try:
