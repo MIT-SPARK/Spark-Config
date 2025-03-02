@@ -32,12 +32,12 @@
 from dataclasses import dataclass, field
 from typing import Any
 
-import ouroboros as ob
+import spark_config as sc
 
 
-@ob.register_config("test", name="foo")
+@sc.register_config("test", name="foo")
 @dataclass
-class Foo(ob.Config):
+class Foo(sc.Config):
     """Test configuration struct."""
 
     a: float = 5.0
@@ -45,9 +45,9 @@ class Foo(ob.Config):
     c: str = "hello"
 
 
-@ob.register_config("test", name="bar")
+@sc.register_config("test", name="bar")
 @dataclass
-class Bar(ob.Config):
+class Bar(sc.Config):
     """Test configuration struct."""
 
     bar: str = "world"
@@ -55,15 +55,15 @@ class Bar(ob.Config):
 
 
 @dataclass
-class Parent(ob.Config):
+class Parent(sc.Config):
     """Test configuration struct."""
 
-    child: Any = ob.config_field("test", default="foo")
+    child: Any = sc.config_field("test", default="foo")
     param: float = -1.0
 
 
 @dataclass
-class NestedConfig(ob.Config):
+class NestedConfig(sc.Config):
     """Test configuration struct."""
 
     foo: Foo = field(default_factory=Foo)
@@ -137,7 +137,7 @@ def test_save_load(tmp_path):
     filepath = tmp_path / "config.yaml"
     parent = Parent(child=Bar(bar="hello", d="2.0"), param=-2.0)
     parent.save(filepath)
-    result = ob.Config.load(Parent, filepath)
+    result = sc.Config.load(Parent, filepath)
     assert parent == result
 
 
@@ -150,7 +150,7 @@ def test_show():
 
 def test_factory():
     """Test that the factory works."""
-    registered = ob.ConfigFactory.registered()
+    registered = sc.ConfigFactory.registered()
     assert len(registered) > 0
     assert "test" in registered
     registered_names = [x[0] for x in registered["test"]]
