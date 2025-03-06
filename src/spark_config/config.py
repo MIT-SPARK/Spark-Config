@@ -34,10 +34,31 @@ import dataclasses
 import logging
 import pathlib
 import pprint
+import typing
 
 import yaml
 
 Logger = logging.getLogger(__name__)
+
+
+def _is_config_list(list_type):
+    return issubclass(typing.get_args(list_type)[0], Config)
+
+
+def _parse_yaml_leaf(field, value, strict=True):
+    if not strict:
+        return value
+
+    return field.metadata.get("yaml_converter", field.type)(value)
+
+
+def _sequence_iter(yaml_field):
+    if isinstance(yaml_field, list):
+        for x in yaml_field:
+            yield x
+    elif isinstance(yaml_field, dict):
+        for _, v in yaml_field.items():
+            yield v
 
 
 class Config:
@@ -67,35 +88,79 @@ class Config:
         with filepath.open("w") as fout:
             fout.write(yaml.safe_dump(self.dump()))
 
-    def update(self, config):
-        """Load settings from a dumped config."""
+    def update(self, config, strict: bool = True, _parent_name=""):
+        """
+        Load settings from a dumped config.
+
+        When parsing a field that is a list of configs, the parsed list will override
+        what was already set for that field if the field is specified in the parameter tree.
+        This allows clearing a default list with elements by specifying an empty list in yaml.
+
+        Args:
+            config (dict[Any, Any]): Parsed YAML parameter tree representation
+            strict: Enforce dataclass types when parsing
+        """
         if not isinstance(config, dict):
             Logger.error(f"Invalid config data provided to {self}")
             return
 
         for field in dataclasses.fields(self):
+            global_name = (
+                _parent_name + "/" + field.name if _parent_name != "" else field.name
+            )
             prev = getattr(self, field.name)
+            # NOTE(nathan) issubclass(field.type, Config) sorta works here but generics get complicated
             if isinstance(prev, Config) or field.metadata.get("virtual_config", False):
                 try:
-                    prev.update(config.get(field.name, {}))
+                    prev.update(
+                        config.get(field.name, {}),
+                        strict=strict,
+                        _parent_name=global_name,
+                    )
                 except KeyError as e:
-                    Logger.error(f"Could not update nested config '{field.name}'!")
+                    Logger.error(f"Could not update nested config '{global_name}'!")
                     raise e
+            elif isinstance(prev, list) and _is_config_list(field.type):
+                if field.name not in config:
+                    continue
+
+                parsed = []
+                for idx, subconfig in enumerate(
+                    _sequence_iter(config.get(field.name, []))
+                ):
+                    subfield = typing.get_args(field.type)[0]()
+                    subfield.update(
+                        subconfig, strict=strict, _parent_name=global_name + f"[{idx}]"
+                    )
+                    parsed.append(subfield)
+
+                setattr(self, field.name, parsed)
             else:
-                setattr(self, field.name, config.get(field.name, prev))
+                try:
+                    setattr(
+                        self,
+                        field.name,
+                        _parse_yaml_leaf(
+                            field, config.get(field.name, prev), strict=strict
+                        ),
+                    )
+                except Exception as e:
+                    Logger.error(
+                        f"Skipping invalid YAML when parsing {type(self)} at '{global_name}' ({field.type}): {e}"
+                    )
 
     def show(self):
         """Show config in human readable format."""
         return f"{self.__class__.__name__}:\n{pprint.pformat(self.dump())}"
 
     @staticmethod
-    def load(cls, filepath):
+    def load(cls, filepath, strict=True):
         """Load an abitrary config from file."""
         assert issubclass(cls, Config), f"{cls} is not a config!"
 
         instance = cls()
         with pathlib.Path(filepath).open("r") as fin:
-            instance.update(yaml.safe_load(fin))
+            instance.update(yaml.safe_load(fin), strict=strict)
 
         return instance
 
@@ -198,8 +263,17 @@ class VirtualConfig:
         values["type"] = self._type
         return values
 
-    def update(self, config_data):
-        """Update config struct."""
+    def update(self, config_data, strict=True, _parent_name=""):
+        """
+        Update virtual config from parsed parameters.
+
+        Will reset the underlying config if `type: CONFIG_TYPE` is in the parameter
+        tree.
+
+        Args:
+            config_data (dict[Any, Any]): Parsed YAML parameter tree representation
+            strict: Enforce dataclass types when parsing
+        """
 
         assert config_data is None or isinstance(config_data, dict), (
             f"VirtualConfig must be updated by dict (or None), not {type(config_data)}. You probably nested your configuration wrong"
@@ -216,7 +290,7 @@ class VirtualConfig:
             self._create(typename=typename)
 
         if self._config is not None and config_data != {}:
-            self._config.update(config_data)
+            self._config.update(config_data, strict=strict, _parent_name=_parent_name)
 
     def create(self, *args, **kwargs):
         """Call constructor with config."""

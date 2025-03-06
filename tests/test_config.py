@@ -30,7 +30,8 @@
 """Test that configuration structs work as expected."""
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, List
+import yaml
 
 import spark_config as sc
 
@@ -135,9 +136,9 @@ def test_dump_recursive():
 def test_save_load(tmp_path):
     """Test that saving and loading works."""
     filepath = tmp_path / "config.yaml"
-    parent = Parent(child=Bar(bar="hello", d="2.0"), param=-2.0)
+    parent = Parent(child=Bar(bar="hello", d=2.0), param=-2.0)
     parent.save(filepath)
-    result = sc.Config.load(Parent, filepath)
+    result = sc.Config.load(Parent, filepath, strict=False)
     assert parent == result
 
 
@@ -156,3 +157,24 @@ def test_factory():
     registered_names = [x[0] for x in registered["test"]]
     assert "foo" in registered_names
     assert "bar" in registered_names
+
+
+def test_config_list():
+    """Test that loading lists of configs works."""
+
+    @dataclass
+    class ListConfig(sc.Config):
+        children: List[Foo] = field(default_factory=list)
+
+    contents = """
+children:
+- {a: 1, b: 2, c: 3}
+- {a: 2, b: 3, c: 4}
+- {}
+"""
+
+    parsed = yaml.safe_load(contents)
+
+    config = ListConfig()
+    config.update(parsed)
+    assert config.children == [Foo(a=1.0, b=2, c="3"), Foo(a=2.0, b=3, c="4"), Foo()]
