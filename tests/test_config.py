@@ -34,6 +34,7 @@ from typing import Any, List
 import yaml
 
 import spark_config as sc
+import logging
 
 
 @sc.register_config("test", name="foo")
@@ -69,6 +70,11 @@ class NestedConfig(sc.Config):
 
     foo: Foo = field(default_factory=Foo)
     other: str = "world"
+
+
+@dataclass
+class ListConfig(sc.Config):
+    children: List[Foo] = field(default_factory=list)
 
 
 def test_dump():
@@ -138,7 +144,7 @@ def test_save_load(tmp_path):
     filepath = tmp_path / "config.yaml"
     parent = Parent(child=Bar(bar="hello", d=2.0), param=-2.0)
     parent.save(filepath)
-    result = sc.Config.load(Parent, filepath, strict=False)
+    result = sc.Config.load(Parent, filepath)
     assert parent == result
 
 
@@ -161,20 +167,64 @@ def test_factory():
 
 def test_config_list():
     """Test that loading lists of configs works."""
-
-    @dataclass
-    class ListConfig(sc.Config):
-        children: List[Foo] = field(default_factory=list)
-
     contents = """
 children:
 - {a: 1, b: 2, c: 3}
 - {a: 2, b: 3, c: 4}
 - {}
 """
+    config = ListConfig()
+    config.update(yaml.safe_load(contents))
+    assert config.children == [Foo(a=1.0, b=2, c="3"), Foo(a=2.0, b=3, c="4"), Foo()]
 
-    parsed = yaml.safe_load(contents)
+
+def test_config_list_from_map():
+    """Test that loading lists of configs from YAML map works."""
+    contents = """
+children:
+  child_a: {a: 1, b: 2, c: 3}
+  child_b: {a: 2, b: 3, c: 4}
+  child_c: {}
+"""
 
     config = ListConfig()
-    config.update(parsed)
+    config.update(yaml.safe_load(contents))
     assert config.children == [Foo(a=1.0, b=2, c="3"), Foo(a=2.0, b=3, c="4"), Foo()]
+
+
+def test_config_override():
+    """Test that we can clear default lists."""
+    config = ListConfig()
+    config.children = [Foo(a=1.0, b=2, c="3"), Foo(a=2.0, b=3, c="4"), Foo()]
+
+    # children not set: keep previous values
+    config.update({})
+    assert config.children == [Foo(a=1.0, b=2, c="3"), Foo(a=2.0, b=3, c="4"), Foo()]
+
+    # children set: clear previous values
+    config.update({"children": []})
+    assert config.children == []
+
+
+def test_invalid_field(caplog):
+    """Test that invalid types don't get set with strict parsing."""
+    config = Bar()
+    with caplog.at_level(logging.ERROR, logger=sc.Logger.name):
+        sc.Logger.propagate = True
+
+        config.update({"bar": "test", "d": "2.0"})
+        assert config == Bar(bar="test")
+        config.update({"bar": "test", "d": "2.0"}, strict=False)
+        assert config == Bar(bar="test", d="2.0")
+
+    assert len(caplog.records) == 1
+
+
+def test_unregistered(caplog):
+    """Test that factory handles unregistered types correctly."""
+    with caplog.at_level(logging.WARNING, logger=sc.Logger.name):
+        sc.Logger.propagate = True
+        assert sc.ConfigFactory.create("some_category", "some_type") is None
+        assert sc.ConfigFactory.create("test", "some_type") is None
+
+    assert len(caplog.records) == 2
