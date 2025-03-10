@@ -35,45 +35,70 @@ import logging
 import pathlib
 import pprint
 import typing
+import inspect
 
 import yaml
 
 Logger = logging.getLogger(__name__)
 
 
-def parse_config_leaf(field_type, field, value, strict=True):
-    """
-    Forwards any unregistered type to get added to the parsed config.
+class LeafConfigParser:
+    """Parser for non-config types."""
 
-    Register a conversion for a type via the `@parse_config_leaf.register
-    decorator.
+    __shared_state = None
+
+    def __init__(self):
+        """Make a factory."""
+        # Borg pattern: set class state to global state
+        if not LeafConfigParser.__shared_state:
+            LeafConfigParser.__shared_state = self.__dict__
+            self._registry = {}
+        else:
+            self.__dict__ = LeafConfigParser.__shared_state
+
+    @staticmethod
+    def register(field_type, parser_func):
+        """Register a config type with the factory."""
+        LeafConfigParser()._registry[field_type] = parser_func
+
+    @staticmethod
+    def parse(field_type, field, value, strict=True):
+        instance = LeafConfigParser()
+        if field_type not in instance._registry:
+            return value
+
+        return instance._registry[field_type](field_type, field, value, strict=strict)
+
+
+def register_leaf_parser(func):
+    """
+    Register a conversion for a non-config type.
+
+    Can be used as a decorator.
     """
 
-    conversions = {}
-    def register(func):
-        conversions[func] = func
+    param = next(iter(inspect.signature(func).parameters.values()), None)
+    if param is None:
+        logging.error(f"Invalid signature: {inspect.signature(func)}!")
         return func
 
-    logging.error(f"Using normal parsing for {field}: {value}")
-    return value
+    LeafConfigParser.register(param.annotation, func)
+    return func
 
 
-@parse_config_leaf.register
+@register_leaf_parser
 def _(field_type: int, field, value, strict=True):
-    logging.error(f"Using int parsing for {field}: {value}")
-    return value
+    return int(value) if strict else value
 
 
-@parse_config_leaf.register
+@register_leaf_parser
 def _(field_type: float, field, value, strict=True):
-    logging.error(f"Using float parsing for {field}: {value}")
-    return value
+    return float(value) if strict else value
 
 
-@parse_config_leaf.register
+@register_leaf_parser
 def _(field_type: str, field, value, strict=True):
-    logging.error(f"Using str parsing for {field}: {value}")
-    return value
+    return str(value) if strict else value
 
 
 def _is_config_list(list_type):
@@ -130,7 +155,7 @@ class Config:
             if "yaml_converter" in field.metadata:
                 value = field.metadata["yaml_converter"](value)
             elif strict:
-                value = parse_config_leaf(field.type, field, value, strict=strict)
+                value = LeafConfigParser.parse(field.type, field, value, strict=strict)
 
             setattr(self, field.name, value)
         except Exception as e:
