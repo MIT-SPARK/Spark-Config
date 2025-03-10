@@ -31,11 +31,11 @@
 
 import copy
 import dataclasses
+import inspect
 import logging
 import pathlib
 import pprint
 import typing
-import inspect
 
 import yaml
 

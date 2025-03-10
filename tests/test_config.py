@@ -29,15 +29,16 @@
 #
 """Test that configuration structs work as expected."""
 
+import copy
+import logging
+import math
 from dataclasses import dataclass, field
 from typing import Any, List, Optional
+
 import pytest
-import math
 import yaml
-import copy
 
 import spark_config as sc
-import logging
 
 
 @dataclass
