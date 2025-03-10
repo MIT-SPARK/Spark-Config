@@ -181,7 +181,7 @@ class Config:
             field_config = config[field.name]
             # NOTE(nathan) issubclass(field.type, Config) sorta works here but generics get complicated
             if isinstance(prev, Config) or field.metadata.get("virtual_config", False):
-                self._parse_yaml_subconfig(field, field_config, global_name, strict)
+                prev.update(field_config, strict=strict, _parent=global_name)
             elif isinstance(prev, list) and _is_config_list(field.type):
                 self._parse_yaml_list(field, field_config, global_name, strict)
             else:
@@ -201,14 +201,6 @@ class Config:
             instance.update(yaml.safe_load(fin), strict=strict)
 
         return instance
-
-    def _parse_yaml_subconfig(self, field, field_config, global_name, strict=True):
-        try:
-            prev = getattr(self, field.name)
-            prev.update(field_config, strict=strict, _parent=global_name)
-        except KeyError as e:
-            Logger.error(f"Could not update nested config '{global_name}'!")
-            raise e
 
     def _parse_yaml_leaf(self, field, field_config, global_name, strict=True):
         try:
