@@ -382,11 +382,15 @@ class VirtualConfig:
         name = self._get_curr_typename()
         constructor = ConfigFactory.get_constructor(self.category, name)
         if constructor is None:
-            if not self.required:
-                Logger.warning(f"Constructor not specified for {self}!")
-                return None
+            if self.required:
+                raise ValueError(
+                    f"No constructor found for '{self.category}' and '{name}'"
+                )
 
-            raise ValueError(f"No constructor found for '{self.category}' and '{name}'")
+            if name is not None:
+                Logger.warning(f"Constructor not specified for {self}!")
+
+            return None
 
         if not self._config:
             self._create()
