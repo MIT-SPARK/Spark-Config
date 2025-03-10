@@ -155,7 +155,7 @@ class Config:
         with filepath.open("w") as fout:
             fout.write(yaml.safe_dump(self.dump()))
 
-    def update(self, config, strict: bool = True, _parent=""):
+    def update(self, config, strict=True, warn_missing=False, _parent=""):
         """
         Load settings from a dumped config.
 
@@ -165,7 +165,8 @@ class Config:
 
         Args:
             config (dict[Any, Any]): Parsed YAML parameter tree representation
-            strict: Enforce dataclass types when parsing
+            strict (bool): Enforce dataclass types when parsing
+            warn_missing (bool): Warn if YAML parameter is missing
         """
         if not isinstance(config, dict):
             Logger.error(f"Invalid config data provided to {self}")
@@ -174,31 +175,46 @@ class Config:
         for field in dataclasses.fields(self):
             global_name = _parent + "/" + field.name if _parent != "" else field.name
             if field.name not in config:
-                Logger.warning(f"Missing {global_name} when parsing config!")
+                if warn_missing:
+                    Logger.warning(f"Missing {global_name} when parsing config!")
+
                 continue
 
             prev = getattr(self, field.name)
             field_config = config[field.name]
             # NOTE(nathan) issubclass(field.type, Config) sorta works here but generics get complicated
             if isinstance(prev, Config) or field.metadata.get("virtual_config", False):
-                prev.update(field_config, strict=strict, _parent=global_name)
+                prev.update(
+                    field_config,
+                    strict=strict,
+                    warn_missing=warn_missing,
+                    _parent=global_name,
+                )
             elif isinstance(prev, list) and _is_config_list(field.type):
-                self._parse_yaml_list(field, field_config, global_name, strict)
+                self._parse_yaml_list(
+                    field,
+                    field_config,
+                    global_name,
+                    strict=strict,
+                    warn_missing=warn_missing,
+                )
             else:
-                self._parse_yaml_leaf(field, field_config, global_name, strict)
+                self._parse_yaml_leaf(field, field_config, global_name, strict=strict)
 
     def show(self):
         """Show config in human readable format."""
         return f"{self.__class__.__name__}:\n{pprint.pformat(self.dump())}"
 
     @staticmethod
-    def load(cls, filepath, strict=True):
+    def load(cls, filepath, strict=True, warn_missing=False):
         """Load an abitrary config from file."""
         assert issubclass(cls, Config), f"{cls} is not a config!"
 
         instance = cls()
         with pathlib.Path(filepath).open("r") as fin:
-            instance.update(yaml.safe_load(fin), strict=strict)
+            instance.update(
+                yaml.safe_load(fin), strict=strict, warn_missing=warn_missing
+            )
 
         return instance
 
@@ -215,7 +231,7 @@ class Config:
             field_str = f"{type(self)} at '{global_name}' ({field.type})"
             Logger.error(f"Skipping invalid YAML when parsing {field_str}: {e}")
 
-    def _parse_yaml_list(self, field, field_config, global_name, strict=True):
+    def _parse_yaml_list(self, field, field_config, global_name, **kwargs):
         parsed = []
         for idx, subconfig in enumerate(_sequence_iter(field_config)):
             curr_name = global_name + f"[{idx}]"
@@ -225,7 +241,7 @@ class Config:
                 Logger.error(f"Could not init {field.type} at '{global_name}': {e}")
                 break
 
-            subfield.update(subconfig, strict=strict, _parent=curr_name)
+            subfield.update(subconfig, _parent=curr_name, **kwargs)
             parsed.append(subfield)
 
         setattr(self, field.name, parsed)
@@ -328,7 +344,7 @@ class VirtualConfig:
         values["type"] = self._type
         return values
 
-    def update(self, config_data, strict=True, _parent=""):
+    def update(self, config_data, strict=True, warn_missing=False, _parent=""):
         """
         Update virtual config from parsed parameters.
 
@@ -338,6 +354,7 @@ class VirtualConfig:
         Args:
             config_data (dict[Any, Any]): Parsed YAML parameter tree representation
             strict: Enforce dataclass types when parsing
+            warn_missing: Warn if fields aren't present in YAML
         """
 
         if config_data is not None and not isinstance(config_data, dict):
@@ -354,7 +371,9 @@ class VirtualConfig:
             self._create(typename=typename)
 
         if self._config is not None and config_data != {}:
-            self._config.update(config_data, strict=strict, _parent=_parent)
+            self._config.update(
+                config_data, strict=strict, warn_missing=warn_missing, _parent=_parent
+            )
 
         return self
 
