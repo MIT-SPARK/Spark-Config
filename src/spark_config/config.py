@@ -41,15 +41,43 @@ import yaml
 Logger = logging.getLogger(__name__)
 
 
+def parse_config_leaf(field_type, field, value, strict=True):
+    """
+    Forwards any unregistered type to get added to the parsed config.
+
+    Register a conversion for a type via the `@parse_config_leaf.register
+    decorator.
+    """
+
+    conversions = {}
+    def register(func):
+        conversions[func] = func
+        return func
+
+    logging.error(f"Using normal parsing for {field}: {value}")
+    return value
+
+
+@parse_config_leaf.register
+def _(field_type: int, field, value, strict=True):
+    logging.error(f"Using int parsing for {field}: {value}")
+    return value
+
+
+@parse_config_leaf.register
+def _(field_type: float, field, value, strict=True):
+    logging.error(f"Using float parsing for {field}: {value}")
+    return value
+
+
+@parse_config_leaf.register
+def _(field_type: str, field, value, strict=True):
+    logging.error(f"Using str parsing for {field}: {value}")
+    return value
+
+
 def _is_config_list(list_type):
     return issubclass(typing.get_args(list_type)[0], Config)
-
-
-def _parse_yaml_leaf(field, value, strict=True):
-    if not strict:
-        return value
-
-    return field.metadata.get("yaml_converter", field.type)(value)
 
 
 def _sequence_iter(yaml_field):
@@ -88,7 +116,42 @@ class Config:
         with filepath.open("w") as fout:
             fout.write(yaml.safe_dump(self.dump()))
 
-    def update(self, config, strict: bool = True, _parent_name=""):
+    def _parse_yaml_subconfig(self, field, field_config, global_name, strict=True):
+        try:
+            prev = getattr(self, field.name)
+            prev.update(field_config, strict=strict, _parent=global_name)
+        except KeyError as e:
+            Logger.error(f"Could not update nested config '{global_name}'!")
+            raise e
+
+    def _parse_yaml_leaf(self, field, field_config, global_name, strict=True):
+        try:
+            value = field_config
+            if "yaml_converter" in field.metadata:
+                value = field.metadata["yaml_converter"](value)
+            elif strict:
+                value = parse_config_leaf(field.type, field, value, strict=strict)
+
+            setattr(self, field.name, value)
+        except Exception as e:
+            field_str = f"{type(self)} at '{global_name}' ({field.type})"
+            Logger.error(f"Skipping invalid YAML when parsing {field_str}: {e}")
+
+    def _parse_yaml_list(self, field, field_config, global_name, strict=True):
+        parsed = []
+        for idx, subconfig in enumerate(_sequence_iter(field_config)):
+            curr_name = global_name + f"[{idx}]"
+            try:
+                subfield = typing.get_args(field.type)[0]()
+            except Exception as e:
+                Logger.error(f"Could not init {field.type} at '{global_name}': {e}")
+
+            subfield.update(subconfig, strict=strict, _parent=curr_name)
+            parsed.append(subfield)
+
+        setattr(self, field.name, parsed)
+
+    def update(self, config, strict: bool = True, _parent=""):
         """
         Load settings from a dumped config.
 
@@ -105,49 +168,20 @@ class Config:
             return
 
         for field in dataclasses.fields(self):
-            global_name = (
-                _parent_name + "/" + field.name if _parent_name != "" else field.name
-            )
+            global_name = _parent + "/" + field.name if _parent != "" else field.name
+            if field.name not in config:
+                Logger.warning(f"Missing {global_name} when parsing config!")
+                continue
+
             prev = getattr(self, field.name)
+            field_config = config[field.name]
             # NOTE(nathan) issubclass(field.type, Config) sorta works here but generics get complicated
             if isinstance(prev, Config) or field.metadata.get("virtual_config", False):
-                try:
-                    prev.update(
-                        config.get(field.name, {}),
-                        strict=strict,
-                        _parent_name=global_name,
-                    )
-                except KeyError as e:
-                    Logger.error(f"Could not update nested config '{global_name}'!")
-                    raise e
+                self._parse_yaml_subconfig(field, field_config, global_name, strict)
             elif isinstance(prev, list) and _is_config_list(field.type):
-                if field.name not in config:
-                    continue
-
-                parsed = []
-                for idx, subconfig in enumerate(
-                    _sequence_iter(config.get(field.name, []))
-                ):
-                    subfield = typing.get_args(field.type)[0]()
-                    subfield.update(
-                        subconfig, strict=strict, _parent_name=global_name + f"[{idx}]"
-                    )
-                    parsed.append(subfield)
-
-                setattr(self, field.name, parsed)
+                self._parse_yaml_list(field, field_config, global_name, strict)
             else:
-                try:
-                    setattr(
-                        self,
-                        field.name,
-                        _parse_yaml_leaf(
-                            field, config.get(field.name, prev), strict=strict
-                        ),
-                    )
-                except Exception as e:
-                    Logger.error(
-                        f"Skipping invalid YAML when parsing {type(self)} at '{global_name}' ({field.type}): {e}"
-                    )
+                self._parse_yaml_leaf(field, field_config, global_name, strict)
 
     def show(self):
         """Show config in human readable format."""
@@ -263,7 +297,7 @@ class VirtualConfig:
         values["type"] = self._type
         return values
 
-    def update(self, config_data, strict=True, _parent_name=""):
+    def update(self, config_data, strict=True, _parent=""):
         """
         Update virtual config from parsed parameters.
 
@@ -275,9 +309,10 @@ class VirtualConfig:
             strict: Enforce dataclass types when parsing
         """
 
-        assert config_data is None or isinstance(config_data, dict), (
-            f"VirtualConfig must be updated by dict (or None), not {type(config_data)}. You probably nested your configuration wrong"
-        )
+        if config_data is not None and not isinstance(config_data, dict):
+            raise ValueError(
+                f"VirtualConfig must be updated by Optional[dict], not {type(config_data)}. You probably nested your configuration wrong"
+            )
 
         try:
             typename = config_data.get("type")
@@ -290,7 +325,7 @@ class VirtualConfig:
             self._create(typename=typename)
 
         if self._config is not None and config_data != {}:
-            self._config.update(config_data, strict=strict, _parent_name=_parent_name)
+            self._config.update(config_data, strict=strict, _parent=_parent)
 
     def create(self, *args, **kwargs):
         """Call constructor with config."""
