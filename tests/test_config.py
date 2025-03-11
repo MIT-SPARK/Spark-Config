@@ -29,10 +29,38 @@
 #
 """Test that configuration structs work as expected."""
 
+import copy
+import logging
+import math
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, List, Optional
+
+import pytest
+import yaml
 
 import spark_config as sc
+
+
+@dataclass
+class OmniConfig(sc.Config):
+    foo: Optional[Any] = None
+
+
+@dataclass
+class FloorConfig(sc.Config):
+    foo: int = field(
+        default=0, metadata={"yaml_converter": lambda x: int(math.floor(float(x)))}
+    )
+
+
+@dataclass
+class InvalidConfig(sc.Config):
+    foo: int
+
+
+@dataclass
+class InvalidList(sc.Config):
+    children: List[InvalidConfig] = field(default_factory=list)
 
 
 @sc.register_config("test", name="foo")
@@ -70,6 +98,26 @@ class NestedConfig(sc.Config):
     other: str = "world"
 
 
+@dataclass
+class ListConfig(sc.Config):
+    children: List[Foo] = field(default_factory=list)
+
+
+class FloorConverter:
+    def __init__(self, foo):
+        self.foo = foo
+
+    @classmethod
+    def from_config(cls, config):
+        return cls(int(math.floor(config.foo)))
+
+
+@sc.register_config("test", name="custom", constructor=FloorConverter.from_config)
+@dataclass
+class CustomConfig(sc.Config):
+    foo: float = 0.5
+
+
 def test_dump():
     """Make sure dumping works as expected."""
     foo = Foo()
@@ -87,8 +135,11 @@ def test_dump():
     expected = {"child": {"type": "foo", "a": 5.0, "b": 2, "c": "hello"}, "param": -1.0}
     assert result == expected
 
+    unset_config = sc.VirtualConfig("test")
+    assert unset_config.dump() is None
 
-def test_update():
+
+def test_update(caplog):
     """Test that update works as expected."""
     foo = Foo()
     assert foo == Foo()
@@ -110,6 +161,19 @@ def test_update():
     parent = Parent()
     parent.update({"child": {"b": 1, "c": "world"}, "param": -2.0})
     assert parent == Parent(child=Foo(a=5.0, b=1, c="world"), param=-2.0)
+
+    virtual_config = sc.VirtualConfig("test", required=True)
+    with pytest.raises(ValueError):
+        virtual_config.update([])
+
+    caplog.clear()
+    with caplog.at_level(logging.ERROR, logger=sc.Logger.name):
+        sc.Logger.propagate = True
+        with pytest.raises(ValueError):
+            virtual_config.update({})
+
+    assert len(caplog.records) == 1
+    assert "Could not get type" in caplog.records[0].msg
 
 
 def test_update_recursive():
@@ -135,7 +199,7 @@ def test_dump_recursive():
 def test_save_load(tmp_path):
     """Test that saving and loading works."""
     filepath = tmp_path / "config.yaml"
-    parent = Parent(child=Bar(bar="hello", d="2.0"), param=-2.0)
+    parent = Parent(child=Bar(bar="hello", d=2.0), param=-2.0)
     parent.save(filepath)
     result = sc.Config.load(Parent, filepath)
     assert parent == result
@@ -156,3 +220,172 @@ def test_factory():
     registered_names = [x[0] for x in registered["test"]]
     assert "foo" in registered_names
     assert "bar" in registered_names
+
+
+def test_config_list():
+    """Test that loading lists of configs works."""
+    contents = """
+children:
+- {a: 1, b: 2, c: 3}
+- {a: 2, b: 3, c: 4}
+- {}
+"""
+    config = ListConfig()
+    config.update(yaml.safe_load(contents))
+    assert config.children == [Foo(a=1.0, b=2, c="3"), Foo(a=2.0, b=3, c="4"), Foo()]
+
+
+def test_config_list_from_map():
+    """Test that loading lists of configs from YAML map works."""
+    contents = """
+children:
+  child_a: {a: 1, b: 2, c: 3}
+  child_b: {a: 2, b: 3, c: 4}
+  child_c: {}
+"""
+
+    config = ListConfig()
+    config.update(yaml.safe_load(contents))
+    assert config.children == [Foo(a=1.0, b=2, c="3"), Foo(a=2.0, b=3, c="4"), Foo()]
+
+
+def test_config_override():
+    """Test that we can clear default lists."""
+    config = ListConfig()
+    config.children = [Foo(a=1.0, b=2, c="3"), Foo(a=2.0, b=3, c="4"), Foo()]
+
+    # children not set: keep previous values
+    config.update({})
+    assert config.children == [Foo(a=1.0, b=2, c="3"), Foo(a=2.0, b=3, c="4"), Foo()]
+
+    # children set: clear previous values
+    config.update({"children": []})
+    assert config.children == []
+
+
+def test_invalid_field(caplog):
+    """Test that invalid types don't get set with strict parsing."""
+    config = Bar()
+    with caplog.at_level(logging.ERROR, logger=sc.Logger.name):
+        sc.Logger.propagate = True
+
+        config.update({"bar": "test", "d": "2.0"})
+        assert config == Bar(bar="test")
+        config.update({"bar": "test", "d": "2.0"}, strict=False)
+        assert config == Bar(bar="test", d="2.0")
+
+    assert len(caplog.records) == 1
+
+
+def test_unregistered(caplog):
+    """Test that factory handles unregistered types correctly."""
+    with caplog.at_level(logging.WARNING, logger=sc.Logger.name):
+        sc.Logger.propagate = True
+        assert sc.ConfigFactory.create("some_category", "some_type") is None
+        assert sc.ConfigFactory.create("test", "some_type") is None
+
+    assert len(caplog.records) == 2
+
+
+def test_invalid_parser(caplog):
+    """Test that registering an invalid function doesn't work."""
+    with caplog.at_level(logging.ERROR, logger=sc.Logger.name):
+        sc.Logger.propagate = True
+
+        def empty():
+            pass
+
+        sc.register_type_parser(empty)
+
+    assert len(caplog.records) == 1
+    assert "Invalid parser" in caplog.records[0].msg
+
+
+def test_parse_unregistered_type():
+    """Test that unregistered types get passed to config."""
+
+    bar = OmniConfig()
+    assert bar.foo is None
+
+    bar.update({})
+    assert bar.foo is None
+
+    bar.update({"foo": 5})
+    assert bar.foo == 5
+
+    bar.update({"foo": 5.5})
+    assert bar.foo == 5.5
+
+    bar.update({"foo": "5.5"})
+    assert bar.foo == "5.5"
+
+
+def test_manual_parser():
+    """Test that we use manual parsers."""
+
+    bar = FloorConfig()
+    assert bar.foo == 0
+
+    bar.update({"foo": "5.5"})
+    assert bar.foo == 5
+
+    bar.update({"foo": 5.5})
+    assert bar.foo == 5
+
+
+def test_invalid_list(caplog):
+    """Test that we catch trying to construct types that require args."""
+
+    bar = InvalidList()
+    with caplog.at_level(logging.ERROR, logger=sc.Logger.name):
+        sc.Logger.propagate = True
+
+        bar.update({"children": [{"foo": 1}]})
+
+    assert bar.children == []
+    assert len(caplog.records) == 1
+    assert "Could not init" in caplog.records[0].msg
+
+
+def test_virtual_config_create(caplog):
+    """Test that virtual configs use custom constructors properly."""
+
+    result = sc.VirtualConfig("test", default="custom").update({"foo": 5.5}).create()
+    assert isinstance(result, FloorConverter)
+    assert result.foo == 5
+
+    result = sc.VirtualConfig("test", default="custom").create()
+    assert isinstance(result, FloorConverter)
+    assert result.foo == 0
+
+    with caplog.at_level(logging.WARNING, logger=sc.Logger.name):
+        sc.Logger.propagate = True
+
+        result = sc.VirtualConfig("test", default="invalid", required=False).create()
+        assert result is None
+
+        result = sc.VirtualConfig("invalid", default="custom", required=False).create()
+        assert result is None
+
+    with pytest.raises(ValueError):
+        sc.VirtualConfig("invalid", required=True).create()
+
+    assert len(caplog.records) == 2
+    assert "Constructor not specified" in caplog.records[0].msg
+    assert "Constructor not specified" in caplog.records[1].msg
+
+
+def test_virtual_config_copy():
+    """Test that deep-copy works appropriately."""
+    result = sc.VirtualConfig("test", default="custom").update({"foo": 5.5})
+    assert copy.deepcopy(result).dump() == result.dump()
+
+
+def test_forward_attrs():
+    """Test that we can get underlying config fields."""
+    config = sc.VirtualConfig("test", default="custom")
+    assert config.foo == 0.5
+
+    config = sc.VirtualConfig("test", default="invalid")
+    with pytest.raises(ValueError):
+        config.foo

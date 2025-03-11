@@ -31,13 +31,101 @@
 
 import copy
 import dataclasses
+import inspect
 import logging
 import pathlib
 import pprint
+import typing
 
 import yaml
 
 Logger = logging.getLogger(__name__)
+
+
+class ConfigTypeParser:
+    """Parser for non-config types."""
+
+    __shared_state = None
+
+    def __init__(self):
+        """Make a factory."""
+        # Borg pattern: set class state to global state
+        if not ConfigTypeParser.__shared_state:
+            ConfigTypeParser.__shared_state = self.__dict__
+            self._registry = {}
+        else:
+            self.__dict__ = ConfigTypeParser.__shared_state
+
+    @staticmethod
+    def register(field_type, parser_func):
+        """
+        Register a custom parser for a specific type.
+
+        Parsers have the following signature:
+            _(field_type, field: dataclasses.field, value: Any, strict: bool)
+
+        They convert `value` (parsed from YAML) to the field type, optionally
+        respecting the `strict` argument. For numeric types, this usually indicates
+        whether or not to try constructing the type from the YAML value.
+
+        Args:
+            field_type: Type info of desired value
+            parser_func: Function that takes in type info, field description and yaml value
+        """
+        ConfigTypeParser()._registry[field_type] = parser_func
+
+    @staticmethod
+    def parse(field_type, field, value, strict=True):
+        """Parse the value for a field from yaml (for internal use)."""
+        instance = ConfigTypeParser()
+        if field_type not in instance._registry:
+            return value
+
+        return instance._registry[field_type](field_type, field, value, strict=strict)
+
+
+def register_type_parser(func):
+    """
+    Register a conversion for a non-config type.
+
+    Can be used as a decorator.
+    """
+    try:
+        param = next(iter(inspect.signature(func).parameters.values()))
+        ConfigTypeParser.register(param.annotation, func)
+    except Exception as e:
+        logging.error(f"Invalid parser: {e}!")
+        return func
+
+    return func
+
+
+@register_type_parser
+def _(field_type: int, field, value, strict=True):
+    return int(value) if strict else value
+
+
+@register_type_parser
+def _(field_type: float, field, value, strict=True):
+    return float(value) if strict else value
+
+
+@register_type_parser
+def _(field_type: str, field, value, strict=True):
+    return str(value) if strict else value
+
+
+def _is_config_list(list_type):
+    return issubclass(typing.get_args(list_type)[0], Config)
+
+
+def _sequence_iter(yaml_field):
+    if isinstance(yaml_field, list):
+        for x in yaml_field:
+            yield x
+    elif isinstance(yaml_field, dict):
+        for _, v in yaml_field.items():
+            yield v
 
 
 class Config:
@@ -67,37 +155,96 @@ class Config:
         with filepath.open("w") as fout:
             fout.write(yaml.safe_dump(self.dump()))
 
-    def update(self, config):
-        """Load settings from a dumped config."""
+    def update(self, config, strict=True, warn_missing=False, _parent=""):
+        """
+        Load settings from a dumped config.
+
+        When parsing a field that is a list of configs, the parsed list will override
+        what was already set for that field if the field is specified in the parameter tree.
+        This allows clearing a default list with elements by specifying an empty list in yaml.
+
+        Args:
+            config (dict[Any, Any]): Parsed YAML parameter tree representation
+            strict (bool): Enforce dataclass types when parsing
+            warn_missing (bool): Warn if YAML parameter is missing
+        """
         if not isinstance(config, dict):
             Logger.error(f"Invalid config data provided to {self}")
             return
 
         for field in dataclasses.fields(self):
+            global_name = _parent + "/" + field.name if _parent != "" else field.name
+            if field.name not in config:
+                if warn_missing:
+                    Logger.warning(f"Missing {global_name} when parsing config!")
+
+                continue
+
             prev = getattr(self, field.name)
+            field_config = config[field.name]
+            # NOTE(nathan) issubclass(field.type, Config) sorta works here but generics get complicated
             if isinstance(prev, Config) or field.metadata.get("virtual_config", False):
-                try:
-                    prev.update(config.get(field.name, {}))
-                except KeyError as e:
-                    Logger.error(f"Could not update nested config '{field.name}'!")
-                    raise e
+                prev.update(
+                    field_config,
+                    strict=strict,
+                    warn_missing=warn_missing,
+                    _parent=global_name,
+                )
+            elif isinstance(prev, list) and _is_config_list(field.type):
+                self._parse_yaml_list(
+                    field,
+                    field_config,
+                    global_name,
+                    strict=strict,
+                    warn_missing=warn_missing,
+                )
             else:
-                setattr(self, field.name, config.get(field.name, prev))
+                self._parse_yaml_leaf(field, field_config, global_name, strict=strict)
 
     def show(self):
         """Show config in human readable format."""
         return f"{self.__class__.__name__}:\n{pprint.pformat(self.dump())}"
 
     @staticmethod
-    def load(cls, filepath):
+    def load(cls, filepath, strict=True, warn_missing=False):
         """Load an abitrary config from file."""
         assert issubclass(cls, Config), f"{cls} is not a config!"
 
         instance = cls()
         with pathlib.Path(filepath).open("r") as fin:
-            instance.update(yaml.safe_load(fin))
+            instance.update(
+                yaml.safe_load(fin), strict=strict, warn_missing=warn_missing
+            )
 
         return instance
+
+    def _parse_yaml_leaf(self, field, field_config, global_name, strict=True):
+        try:
+            value = field_config
+            if "yaml_converter" in field.metadata:
+                value = field.metadata["yaml_converter"](value)
+            elif strict:
+                value = ConfigTypeParser.parse(field.type, field, value, strict=strict)
+
+            setattr(self, field.name, value)
+        except Exception as e:
+            field_str = f"{type(self)} at '{global_name}' ({field.type})"
+            Logger.error(f"Skipping invalid YAML when parsing {field_str}: {e}")
+
+    def _parse_yaml_list(self, field, field_config, global_name, **kwargs):
+        parsed = []
+        for idx, subconfig in enumerate(_sequence_iter(field_config)):
+            curr_name = global_name + f"[{idx}]"
+            try:
+                subfield = typing.get_args(field.type)[0]()
+            except Exception as e:
+                Logger.error(f"Could not init {field.type} at '{global_name}': {e}")
+                break
+
+            subfield.update(subconfig, _parent=curr_name, **kwargs)
+            parsed.append(subfield)
+
+        setattr(self, field.name, parsed)
 
 
 class ConfigFactory:
@@ -180,9 +327,8 @@ class VirtualConfig:
     def __init__(self, category, default=None, required=True):
         """Make a virtual config."""
         self.category = category
-        self.default = default
         self.required = required
-        self._type = None
+        self._type = default
         self._config = None
 
     def dump(self, **kwargs):
@@ -198,32 +344,52 @@ class VirtualConfig:
         values["type"] = self._type
         return values
 
-    def update(self, config_data):
-        """Update config struct."""
+    def update(self, config_data, strict=True, warn_missing=False, _parent=""):
+        """
+        Update virtual config from parsed parameters.
 
-        assert config_data is None or isinstance(config_data, dict), (
-            f"VirtualConfig must be updated by dict (or None), not {type(config_data)}. You probably nested your configuration wrong"
-        )
+        Will reset the underlying config if `type: CONFIG_TYPE` is in the parameter
+        tree.
 
-        try:
-            typename = config_data.get("type")
-        except Exception:
+        Args:
+            config_data (dict[Any, Any]): Parsed YAML parameter tree representation
+            strict: Enforce dataclass types when parsing
+            warn_missing: Warn if fields aren't present in YAML
+        """
+
+        if config_data is not None and not isinstance(config_data, dict):
+            raise ValueError(
+                f"VirtualConfig must be updated by Optional[dict], not {type(config_data)}. You probably nested your configuration wrong"
+            )
+
+        typename = config_data.get("type", self._type)
+        if typename is None and self.required:
             Logger.error(f"Could not get type for {self} from '{config_data}'!")
-            typename = None
 
         type_changed = typename is not None and self._type != typename
         if not self._config or type_changed:
             self._create(typename=typename)
 
         if self._config is not None and config_data != {}:
-            self._config.update(config_data)
+            self._config.update(
+                config_data, strict=strict, warn_missing=warn_missing, _parent=_parent
+            )
+
+        return self
 
     def create(self, *args, **kwargs):
         """Call constructor with config."""
         name = self._get_curr_typename()
         constructor = ConfigFactory.get_constructor(self.category, name)
-        if not constructor:
-            Logger.warning(f"Constructor not specified for {self}!")
+        if constructor is None:
+            if self.required:
+                raise ValueError(
+                    f"No constructor found for '{self.category}' and '{name}'"
+                )
+
+            if name is not None:
+                Logger.warning(f"Constructor not specified for {self}!")
+
             return None
 
         if not self._config:
@@ -235,7 +401,7 @@ class VirtualConfig:
         return f"<VirtualConfig(category={self.category}, type='{self._type}')>"
 
     def _get_curr_typename(self):
-        return self._type if self._type else self.default
+        return self._type
 
     def _create(self, typename=None, validate=True):
         name = typename if typename else self._get_curr_typename()
@@ -255,23 +421,24 @@ class VirtualConfig:
 
     def __deepcopy__(self, memo):
         """Copy virtual config."""
-        new_config = VirtualConfig(
-            self.category, default=self.default, required=self.required
-        )
+        new_config = VirtualConfig(self.category, required=self.required)
+        new_config._type = self._type
         if self._config:
             new_config._config = copy.deepcopy(self._config, memo)
-            new_config._type = self._type
 
         return new_config
 
     def __getattr__(self, name):
         """Get underlying config field."""
         # TODO(nathan) clean this up
-        assert name not in ["default", "category", "_type", "_config"]
+        assert name not in ["category", "_type", "_config"]
 
         if not self._config:
             # create config if it doesn't exist
-            self._config = self._create()
+            self._create()
+
+        if self._config is None:
+            raise ValueError(f"Uninitialized config: {self}!")
 
         return getattr(self._config, name)
 
