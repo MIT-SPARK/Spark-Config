@@ -37,7 +37,10 @@ import pathlib
 import pprint
 import typing
 
-import yaml
+from ruamel.yaml import YAML
+
+yaml = YAML(typ="safe", pure=True)
+yaml.default_flow_style = False
 
 Logger = logging.getLogger(__name__)
 
@@ -166,7 +169,7 @@ class Config:
         """Dump a class to disk."""
         filepath = pathlib.Path(filepath)
         with filepath.open("w") as fout:
-            fout.write(yaml.safe_dump(self.dump()))
+            yaml.dump(self.dump(), fout)
 
     def update(self, config, strict=True, warn_missing=False, extend=True, _parent=""):
         """
@@ -239,7 +242,9 @@ class Config:
         instance = cls()
         with pathlib.Path(filepath).open("r") as fin:
             instance.update(
-                yaml.safe_load(fin), strict=strict, warn_missing=warn_missing
+                yaml.load(fin),
+                strict=strict,
+                warn_missing=warn_missing,
             )
 
         return instance
