@@ -191,7 +191,7 @@ class Config:
             global_name = _parent + "/" + field.name if _parent != "" else field.name
             if field.name not in config:
                 if warn_missing:
-                    Logger.warning(f"Missing {global_name} when parsing config!")
+                    Logger.warning(f"Missing '{global_name}' when parsing config!")
 
                 continue
 

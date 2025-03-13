@@ -181,6 +181,18 @@ def test_update(caplog):
     assert "Could not get type" in caplog.records[0].msg
 
 
+def test_update_with_missing(caplog):
+    """Test that update works as expected."""
+    foo = Foo()
+    with caplog.at_level(logging.INFO, logger=sc.Logger.name):
+        sc.Logger.propagate = True
+        foo.update({"b": 1, "c": "world"}, warn_missing=True)
+
+    assert foo == Foo(a=5.0, b=1, c="world")
+    assert len(caplog.records) == 1
+    assert "Missing 'a'" in caplog.records[0].msg
+
+
 def test_update_recursive():
     """Test that update recurses to non-virtual configs."""
     nested = NestedConfig()
