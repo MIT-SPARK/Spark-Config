@@ -33,7 +33,7 @@ import copy
 import logging
 import math
 from dataclasses import dataclass, field
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 import pytest
 import yaml
@@ -101,6 +101,11 @@ class NestedConfig(sc.Config):
 @dataclass
 class ListConfig(sc.Config):
     children: List[Foo] = field(default_factory=list)
+
+
+@dataclass
+class DictConfig(sc.Config):
+    children: Dict[str, Foo] = field(default_factory=dict)
 
 
 class FloorConverter:
@@ -247,6 +252,41 @@ children:
     config = ListConfig()
     config.update(yaml.safe_load(contents))
     assert config.children == [Foo(a=1.0, b=2, c="3"), Foo(a=2.0, b=3, c="4"), Foo()]
+
+
+def test_config_map():
+    """Test that loading maps of configs works."""
+    contents = """
+children:
+  one: {a: 1, b: 2, c: 3}
+  two: {a: 2, b: 3, c: 4}
+  four: {}
+"""
+    config = DictConfig()
+    config.update(yaml.safe_load(contents))
+    assert config.children == {
+        "one": Foo(a=1.0, b=2, c="3"),
+        "two": Foo(a=2.0, b=3, c="4"),
+        "four": Foo(),
+    }
+
+
+def test_config_map_from_list():
+    """Test that loading maps of configs from YAML sequence works."""
+    contents = """
+children:
+- {a: 1, b: 2, c: 3}
+- {a: 2, b: 3, c: 4}
+- {}
+"""
+
+    config = DictConfig()
+    config.update(yaml.safe_load(contents))
+    assert config.children == {
+        "0": Foo(a=1.0, b=2, c="3"),
+        "1": Foo(a=2.0, b=3, c="4"),
+        "2": Foo(),
+    }
 
 
 def test_config_override():
