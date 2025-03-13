@@ -63,6 +63,11 @@ class InvalidList(sc.Config):
     children: List[InvalidConfig] = field(default_factory=list)
 
 
+@dataclass
+class InvalidDict(sc.Config):
+    children: Dict[str, InvalidConfig] = field(default_factory=dict)
+
+
 @sc.register_config("test", name="foo")
 @dataclass
 class Foo(sc.Config):
@@ -282,6 +287,19 @@ children:
         "four": Foo(),
     }
 
+    # check that we appropriately re-update existing objects
+    config.update({"children": {"four": {"a": 10.0}, "five": {}}})
+    assert config.children == {
+        "one": Foo(a=1.0, b=2, c="3"),
+        "two": Foo(a=2.0, b=3, c="4"),
+        "four": Foo(a=10.0),
+        "five": Foo(),
+    }
+
+    # check that we can clear a dictionary
+    config.update({"children": {}}, extend=False)
+    assert config.children == {}
+
 
 def test_config_map_from_list():
     """Test that loading maps of configs from YAML sequence works."""
@@ -395,6 +413,20 @@ def test_invalid_list(caplog):
         bar.update({"children": [{"foo": 1}]})
 
     assert bar.children == []
+    assert len(caplog.records) == 1
+    assert "Could not init" in caplog.records[0].msg
+
+
+def test_invalid_map(caplog):
+    """Test that we catch trying to construct types that require args."""
+
+    bar = InvalidDict()
+    with caplog.at_level(logging.ERROR, logger=sc.Logger.name):
+        sc.Logger.propagate = True
+
+        bar.update({"children": {"a": {"foo": 1}}})
+
+    assert bar.children == {}
     assert len(caplog.records) == 1
     assert "Could not init" in caplog.records[0].msg
 
