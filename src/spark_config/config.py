@@ -235,18 +235,26 @@ class Config:
         return f"{self.__class__.__name__}:\n{pprint.pformat(self.dump())}"
 
     @staticmethod
-    def load(cls, filepath, strict=True, warn_missing=False):
-        """Load an abitrary config from file."""
+    def load(cls, filepath, **kwargs):
+        """
+        Load an abitrary config from file.
+
+        Forwards **kwargs to `update`.
+        """
+        with pathlib.Path(filepath).open("r") as fin:
+            return Config.loads(cls, fin.read(), **kwargs)
+
+    @staticmethod
+    def loads(cls, contents: str, **kwargs):
+        """
+        Load an abitrary config from a string representation.
+
+        Forwards **kwargs to `update`.
+        """
         assert issubclass(cls, Config), f"{cls} is not a config!"
 
         instance = cls()
-        with pathlib.Path(filepath).open("r") as fin:
-            instance.update(
-                yaml.load(fin),
-                strict=strict,
-                warn_missing=warn_missing,
-            )
-
+        instance.update(yaml.load(contents), **kwargs)
         return instance
 
     def _parse_yaml_list(self, field, field_config, global_name, **kwargs):
