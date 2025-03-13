@@ -33,7 +33,7 @@ import copy
 import logging
 import math
 from dataclasses import dataclass, field
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 import pytest
 import yaml
@@ -61,6 +61,11 @@ class InvalidConfig(sc.Config):
 @dataclass
 class InvalidList(sc.Config):
     children: List[InvalidConfig] = field(default_factory=list)
+
+
+@dataclass
+class InvalidDict(sc.Config):
+    children: Dict[str, InvalidConfig] = field(default_factory=dict)
 
 
 @sc.register_config("test", name="foo")
@@ -101,6 +106,11 @@ class NestedConfig(sc.Config):
 @dataclass
 class ListConfig(sc.Config):
     children: List[Foo] = field(default_factory=list)
+
+
+@dataclass
+class DictConfig(sc.Config):
+    children: Dict[str, Foo] = field(default_factory=dict)
 
 
 class FloorConverter:
@@ -176,6 +186,18 @@ def test_update(caplog):
     assert "Could not get type" in caplog.records[0].msg
 
 
+def test_update_with_missing(caplog):
+    """Test that update works as expected."""
+    foo = Foo()
+    with caplog.at_level(logging.INFO, logger=sc.Logger.name):
+        sc.Logger.propagate = True
+        foo.update({"b": 1, "c": "world"}, warn_missing=True)
+
+    assert foo == Foo(a=5.0, b=1, c="world")
+    assert len(caplog.records) == 1
+    assert "Missing 'a'" in caplog.records[0].msg
+
+
 def test_update_recursive():
     """Test that update recurses to non-virtual configs."""
     nested = NestedConfig()
@@ -247,6 +269,54 @@ children:
     config = ListConfig()
     config.update(yaml.safe_load(contents))
     assert config.children == [Foo(a=1.0, b=2, c="3"), Foo(a=2.0, b=3, c="4"), Foo()]
+
+
+def test_config_map():
+    """Test that loading maps of configs works."""
+    contents = """
+children:
+  one: {a: 1, b: 2, c: 3}
+  two: {a: 2, b: 3, c: 4}
+  four: {}
+"""
+    config = DictConfig()
+    config.update(yaml.safe_load(contents))
+    assert config.children == {
+        "one": Foo(a=1.0, b=2, c="3"),
+        "two": Foo(a=2.0, b=3, c="4"),
+        "four": Foo(),
+    }
+
+    # check that we appropriately re-update existing objects
+    config.update({"children": {"four": {"a": 10.0}, "five": {}}})
+    assert config.children == {
+        "one": Foo(a=1.0, b=2, c="3"),
+        "two": Foo(a=2.0, b=3, c="4"),
+        "four": Foo(a=10.0),
+        "five": Foo(),
+    }
+
+    # check that we can clear a dictionary
+    config.update({"children": {}}, extend=False)
+    assert config.children == {}
+
+
+def test_config_map_from_list():
+    """Test that loading maps of configs from YAML sequence works."""
+    contents = """
+children:
+- {a: 1, b: 2, c: 3}
+- {a: 2, b: 3, c: 4}
+- {}
+"""
+
+    config = DictConfig()
+    config.update(yaml.safe_load(contents))
+    assert config.children == {
+        "0": Foo(a=1.0, b=2, c="3"),
+        "1": Foo(a=2.0, b=3, c="4"),
+        "2": Foo(),
+    }
 
 
 def test_config_override():
@@ -343,6 +413,20 @@ def test_invalid_list(caplog):
         bar.update({"children": [{"foo": 1}]})
 
     assert bar.children == []
+    assert len(caplog.records) == 1
+    assert "Could not init" in caplog.records[0].msg
+
+
+def test_invalid_map(caplog):
+    """Test that we catch trying to construct types that require args."""
+
+    bar = InvalidDict()
+    with caplog.at_level(logging.ERROR, logger=sc.Logger.name):
+        sc.Logger.propagate = True
+
+        bar.update({"children": {"a": {"foo": 1}}})
+
+    assert bar.children == {}
     assert len(caplog.records) == 1
     assert "Could not init" in caplog.records[0].msg
 

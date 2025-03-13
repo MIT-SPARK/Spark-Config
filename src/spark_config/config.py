@@ -62,7 +62,7 @@ class ConfigTypeParser:
         Register a custom parser for a specific type.
 
         Parsers have the following signature:
-            _(field_type, field: dataclasses.field, value: Any, strict: bool)
+            _(field_type, value: Any, strict: bool)
 
         They convert `value` (parsed from YAML) to the field type, optionally
         respecting the `strict` argument. For numeric types, this usually indicates
@@ -75,13 +75,13 @@ class ConfigTypeParser:
         ConfigTypeParser()._registry[field_type] = parser_func
 
     @staticmethod
-    def parse(field_type, field, value, strict=True):
+    def parse(field_type, value, strict=True):
         """Parse the value for a field from yaml (for internal use)."""
         instance = ConfigTypeParser()
         if field_type not in instance._registry:
             return value
 
-        return instance._registry[field_type](field_type, field, value, strict=strict)
+        return instance._registry[field_type](field_type, value, strict=strict)
 
 
 def register_type_parser(func):
@@ -101,22 +101,26 @@ def register_type_parser(func):
 
 
 @register_type_parser
-def _(field_type: int, field, value, strict=True):
+def _(field_type: int, value, strict=True):
     return int(value) if strict else value
 
 
 @register_type_parser
-def _(field_type: float, field, value, strict=True):
+def _(field_type: float, value, strict=True):
     return float(value) if strict else value
 
 
 @register_type_parser
-def _(field_type: str, field, value, strict=True):
+def _(field_type: str, value, strict=True):
     return str(value) if strict else value
 
 
 def _is_config_list(list_type):
     return issubclass(typing.get_args(list_type)[0], Config)
+
+
+def _is_config_dict(dict_type):
+    return issubclass(typing.get_args(dict_type)[1], Config)
 
 
 def _sequence_iter(yaml_field):
@@ -126,6 +130,15 @@ def _sequence_iter(yaml_field):
     elif isinstance(yaml_field, dict):
         for _, v in yaml_field.items():
             yield v
+
+
+def _map_iter(yaml_field):
+    if isinstance(yaml_field, list):
+        for idx, x in enumerate(yaml_field):
+            yield idx, x
+    elif isinstance(yaml_field, dict):
+        for k, v in yaml_field.items():
+            yield k, v
 
 
 class Config:
@@ -155,17 +168,19 @@ class Config:
         with filepath.open("w") as fout:
             fout.write(yaml.safe_dump(self.dump()))
 
-    def update(self, config, strict=True, warn_missing=False, _parent=""):
+    def update(self, config, strict=True, warn_missing=False, extend=True, _parent=""):
         """
         Load settings from a dumped config.
 
         When parsing a field that is a list of configs, the parsed list will override
-        what was already set for that field if the field is specified in the parameter tree.
-        This allows clearing a default list with elements by specifying an empty list in yaml.
+        what was already set for that field if the field is specified in the parameter
+        tree. This allows clearing a default list with elements by specifying an empty
+        list in yaml.
 
         Args:
             config (dict[Any, Any]): Parsed YAML parameter tree representation
             strict (bool): Enforce dataclass types when parsing
+            extend (bool): Update existing objects instead of clearing.
             warn_missing (bool): Warn if YAML parameter is missing
         """
         if not isinstance(config, dict):
@@ -176,7 +191,7 @@ class Config:
             global_name = _parent + "/" + field.name if _parent != "" else field.name
             if field.name not in config:
                 if warn_missing:
-                    Logger.warning(f"Missing {global_name} when parsing config!")
+                    Logger.warning(f"Missing '{global_name}' when parsing config!")
 
                 continue
 
@@ -188,6 +203,7 @@ class Config:
                     field_config,
                     strict=strict,
                     warn_missing=warn_missing,
+                    extend=extend,
                     _parent=global_name,
                 )
             elif isinstance(prev, list) and _is_config_list(field.type):
@@ -197,6 +213,16 @@ class Config:
                     global_name,
                     strict=strict,
                     warn_missing=warn_missing,
+                    extend=extend,
+                )
+            elif isinstance(prev, dict) and _is_config_dict(field.type):
+                self._parse_yaml_dict(
+                    field,
+                    field_config,
+                    global_name,
+                    strict=strict,
+                    warn_missing=warn_missing,
+                    extend=extend,
                 )
             else:
                 self._parse_yaml_leaf(field, field_config, global_name, strict=strict)
@@ -218,19 +244,6 @@ class Config:
 
         return instance
 
-    def _parse_yaml_leaf(self, field, field_config, global_name, strict=True):
-        try:
-            value = field_config
-            if "yaml_converter" in field.metadata:
-                value = field.metadata["yaml_converter"](value)
-            elif strict:
-                value = ConfigTypeParser.parse(field.type, field, value, strict=strict)
-
-            setattr(self, field.name, value)
-        except Exception as e:
-            field_str = f"{type(self)} at '{global_name}' ({field.type})"
-            Logger.error(f"Skipping invalid YAML when parsing {field_str}: {e}")
-
     def _parse_yaml_list(self, field, field_config, global_name, **kwargs):
         parsed = []
         for idx, subconfig in enumerate(_sequence_iter(field_config)):
@@ -245,6 +258,41 @@ class Config:
             parsed.append(subfield)
 
         setattr(self, field.name, parsed)
+
+    def _parse_yaml_dict(
+        self, field, field_config, global_name, extend=True, strict=True, **kwargs
+    ):
+        parsed = getattr(self, field.name) if extend else {}
+        for key, subconfig in _map_iter(field_config):
+            if strict:
+                key = ConfigTypeParser.parse(
+                    typing.get_args(field.type)[0], key, strict=strict
+                )
+
+            curr_name = global_name + f"[{key}]"
+            try:
+                subfield = parsed.get(key, typing.get_args(field.type)[1]())
+            except Exception as e:
+                Logger.error(f"Could not init {field.type} at '{global_name}': {e}")
+                break
+
+            subfield.update(subconfig, _parent=curr_name, **kwargs)
+            parsed[key] = subfield
+
+        setattr(self, field.name, parsed)
+
+    def _parse_yaml_leaf(self, field, field_config, global_name, strict=True):
+        try:
+            value = field_config
+            if "yaml_converter" in field.metadata:
+                value = field.metadata["yaml_converter"](value)
+            elif strict:
+                value = ConfigTypeParser.parse(field.type, value, strict=strict)
+
+            setattr(self, field.name, value)
+        except Exception as e:
+            field_str = f"{type(self)} at '{global_name}' ({field.type})"
+            Logger.error(f"Skipping invalid YAML when parsing {field_str}: {e}")
 
 
 class ConfigFactory:
@@ -344,7 +392,9 @@ class VirtualConfig:
         values["type"] = self._type
         return values
 
-    def update(self, config_data, strict=True, warn_missing=False, _parent=""):
+    def update(
+        self, config_data, strict=True, warn_missing=False, extend=True, _parent=""
+    ):
         """
         Update virtual config from parsed parameters.
 
@@ -372,7 +422,11 @@ class VirtualConfig:
 
         if self._config is not None and config_data != {}:
             self._config.update(
-                config_data, strict=strict, warn_missing=warn_missing, _parent=_parent
+                config_data,
+                strict=strict,
+                warn_missing=warn_missing,
+                extend=extend,
+                _parent=_parent,
             )
 
         return self
