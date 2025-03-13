@@ -36,7 +36,6 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 import pytest
-import yaml
 
 import spark_config as sc
 
@@ -252,8 +251,7 @@ children:
 - {a: 2, b: 3, c: 4}
 - {}
 """
-    config = ListConfig()
-    config.update(yaml.safe_load(contents))
+    config = sc.Config.loads(ListConfig, contents)
     assert config.children == [Foo(a=1.0, b=2, c="3"), Foo(a=2.0, b=3, c="4"), Foo()]
 
 
@@ -266,8 +264,7 @@ children:
   child_c: {}
 """
 
-    config = ListConfig()
-    config.update(yaml.safe_load(contents))
+    config = sc.Config.loads(ListConfig, contents)
     assert config.children == [Foo(a=1.0, b=2, c="3"), Foo(a=2.0, b=3, c="4"), Foo()]
 
 
@@ -279,8 +276,7 @@ children:
   two: {a: 2, b: 3, c: 4}
   four: {}
 """
-    config = DictConfig()
-    config.update(yaml.safe_load(contents))
+    config = sc.Config.loads(DictConfig, contents)
     assert config.children == {
         "one": Foo(a=1.0, b=2, c="3"),
         "two": Foo(a=2.0, b=3, c="4"),
@@ -310,8 +306,7 @@ children:
 - {}
 """
 
-    config = DictConfig()
-    config.update(yaml.safe_load(contents))
+    config = sc.Config.loads(DictConfig, contents)
     assert config.children == {
         "0": Foo(a=1.0, b=2, c="3"),
         "1": Foo(a=2.0, b=3, c="4"),
