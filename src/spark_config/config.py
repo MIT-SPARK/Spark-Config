@@ -551,6 +551,7 @@ def load_yaml(input_strs, input_files):
     Return:
         Any: Parsed and combined YAML
     """
+
     def _update_if_valid(result, input_stream):
         try:
             result.update(yaml.load(input_stream))
