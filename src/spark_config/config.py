@@ -527,3 +527,43 @@ def config_field(category, default=None, required=True):
         return VirtualConfig(category, default=default, required=required)
 
     return dataclasses.field(default_factory=factory, metadata={"virtual_config": True})
+
+
+def construct(category, info, *args, typename=None, **kwargs):
+    """Construct and object from a config."""
+    typename = info.get("type", typename)
+    if typename is None:
+        raise ValueError("Type not specified!")
+
+    config = ConfigFactory.create(category, typename)
+    config.update(info)
+    return ConfigFactory.get_constructor(category, typename)(config)
+
+
+def load_yaml(input_strs, input_files):
+    """
+    Load yaml from multiple sources
+
+    Args:
+        input_strs (List[str]): YAML string inputs
+        input_files (List[str]): Files containing YAML
+
+    Return:
+        Any: Parsed and combined YAML
+    """
+
+    def _update_if_valid(result, input_stream):
+        try:
+            result.update(yaml.load(input_stream))
+        except Exception as e:
+            logging.error(f"Invalid yaml input: {input_stream}: {e}")
+
+    result = {}
+    for str_in in input_strs:
+        _update_if_valid(result, str_in)
+
+    for file_in in input_files:
+        with open(file_in) as fin:
+            _update_if_valid(result, fin)
+
+    return result
