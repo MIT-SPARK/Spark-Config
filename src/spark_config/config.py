@@ -119,7 +119,10 @@ def _(field_type: str, value, strict=True):
 
 
 def _is_config_list(list_type):
-    return issubclass(typing.get_args(list_type)[0], Config)
+    type_param = typing.get_args(list_type)[0]
+    if isinstance(type_param, dataclasses.Field):
+        return type_param.metadata.get('virtual_config', False)
+    return issubclass(type_param, Config)
 
 
 def _is_config_dict(dict_type):
@@ -261,11 +264,15 @@ class Config:
         parsed = []
         for idx, subconfig in enumerate(_sequence_iter(field_config)):
             curr_name = global_name + f"[{idx}]"
-            try:
-                subfield = typing.get_args(field.type)[0]()
-            except Exception as e:
-                Logger.error(f"Could not init {field.type} at '{global_name}': {e}")
-                break
+            subfield_type = typing.get_args(field.type)[0]
+            if isinstance(subfield_type, dataclasses.Field):
+                subfield = subfield_type.default_factory()
+            else:
+                try:
+                    subfield = subfield_type()
+                except Exception as e:
+                    Logger.error(f"Could not init {field.type} at '{global_name}': {e}")
+                    break
 
             subfield.update(subconfig, _parent=curr_name, **kwargs)
             parsed.append(subfield)
