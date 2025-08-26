@@ -121,7 +121,7 @@ def _(field_type: str, value, strict=True):
 def _is_config_list(list_type):
     type_param = typing.get_args(list_type)[0]
     if isinstance(type_param, dataclasses.Field):
-        return type_param.metadata.get('virtual_config', False)
+        return type_param.metadata.get("virtual_config", False)
     return issubclass(type_param, Config)
 
 
