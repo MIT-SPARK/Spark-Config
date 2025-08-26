@@ -126,7 +126,10 @@ def _is_config_list(list_type):
 
 
 def _is_config_dict(dict_type):
-    return issubclass(typing.get_args(dict_type)[1], Config)
+    value_type_param = typing.get_args(dict_type)[1]
+    if isinstance(value_type_param, dataclasses.Field):
+        return value_type_param.metadata.get("virtual_config", False)
+    return issubclass(value_type_param, Config)
 
 
 def _sequence_iter(yaml_field):
@@ -290,8 +293,12 @@ class Config:
                 )
 
             curr_name = global_name + f"[{key}]"
+            subfield_type = typing.get_args(field.type)[1]
             try:
-                subfield = parsed.get(key, typing.get_args(field.type)[1]())
+                if isinstance(subfield_type, dataclasses.Field):
+                    subfield = parsed.get(key, subfield_type.default_factory())
+                else:
+                    subfield = parsed.get(key, subfield_type())
             except Exception as e:
                 Logger.error(f"Could not init {field.type} at '{global_name}': {e}")
                 break
